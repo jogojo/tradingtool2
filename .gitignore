@@ -1,0 +1,54 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+*.egg-info/
+.eggs/
+.build/
+.dist/
+.pytest_cache/
+.coverage*
+htmlcov/
+.mypy_cache/
+.cache/
+
+# Environnements
+.venv/
+venv/
+ENV/
+
+# IDE/OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Logs
+logs/
+*.log
+
+# Streamlit
+.streamlit/*.lock
+
+# Données locales (ne jamais versionner)
+data/
+*.parquet
+*.feather
+*.arrow
+*.csv
+*.txt
+*.zip
+*.gz
+*.bz2
+# Fichiers temporaires d'upload
+temp_*.txt
+
+# Secrets
+.env
+*.env
+config.env
+
+# Notebooks checkpoints
+.ipynb_checkpoints/
