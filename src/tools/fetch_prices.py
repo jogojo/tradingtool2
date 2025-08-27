@@ -64,6 +64,8 @@ def fetch_prices_at_hhmm(base_dir: Path, asset_class: str, symbol: str, hhmm_utc
     
     # STRATÉGIE: Créer un filtre Arrow sur l'heure/minute
     try:
+        # Sécurité TZ: si l'appelant fournit une timezone explicite, on l'utilise.
+        # Sinon lever une erreur si le symbole n'a pas de mapping lorsqu'on est en mode non-UTC.
         # Parse hh:mm
         hh, mm = map(int, hhmm_utc.split(":"))
         

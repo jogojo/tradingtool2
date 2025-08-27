@@ -16,17 +16,24 @@ except Exception:
 
 
 def _resolve_timezone(symbol: str) -> str:
+    """Résout la timezone d'un symbole sans fallback implicite.
+
+    Lève une ValueError si aucune règle de session n'est trouvée, afin de
+    prévenir l'utilisation involontaire d'UTC.
+    """
     if TradingSessionTemplates is None or SymbolSessionRegistry is None:
-        return "UTC"
-    try:
-        templates = TradingSessionTemplates()
-        reg = SymbolSessionRegistry()
-        tpl = reg.get(symbol)
-        if tpl and tpl in templates.templates:
-            return templates.templates[tpl].get("timezone", "UTC")
-    except Exception:
-        pass
-    return "UTC"
+        raise ValueError("Configuration des sessions indisponible.")
+
+    templates = TradingSessionTemplates()
+    reg = SymbolSessionRegistry()
+    tpl = reg.get(symbol)
+
+    if not tpl:
+        raise ValueError(f"Aucune règle de session trouvée pour '{symbol}'. Mappez le symbole dans la page Calendriers.")
+    if tpl not in templates.templates:
+        raise ValueError(f"Template de session '{tpl}' introuvable pour '{symbol}'. Vérifiez config/trading_sessions.json.")
+
+    return templates.templates[tpl].get("timezone", "UTC")
 
 
 def audit_silver(base_dir: Path, asset_class: str, symbol: str, timezone: Optional[str] = None) -> Tuple[Dict, pd.DataFrame]:

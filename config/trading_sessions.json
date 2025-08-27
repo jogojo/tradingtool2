@@ -10,15 +10,18 @@
       "rth_close": "16:00"
     }
   },
-  "futures_grains_cme": {
+
+  "futures_grains_cme_full": {
     "timezone": "America/Chicago",
-    "description": "CME CBOT grains with midday break",
+    "description": "CBOT grains: Globex evening + day session",
     "session": {
-      "open": "08:30",
+      "open": "19:00",
       "close": "13:20",
       "breaks": [
-        { "start": "12:00", "end": "12:30" }
-      ]
+        { "start": "07:45", "end": "08:30" }
+      ],
+      "rth_open": "08:30",
+      "rth_close": "13:20"
     }
   },
   "futures_eurex": {
@@ -39,6 +42,15 @@
       "breaks": [],
       "rth_open": "09:30",
       "rth_close": "17:00"
+    }
+  },
+  "crypto_24h": {
+    "timezone": "UTC",
+    "description": "Crypto/Forex 24h session in UTC (no breaks, midnight to midnight)",
+    "session": {
+      "open": "00:00",
+      "close": "23:59",
+      "breaks": []
     }
   }
 }

@@ -52,7 +52,7 @@ st.markdown("---")
 st.sidebar.title("Navigation")
 page = st.sidebar.selectbox(
     "Choisir une section",
-    ["Dashboard", "Ingestion des Données", "Silver - Fill Gaps", "Audit Silver", "Récup Prix", "Average Day", "Audit Bronze UTC", "Calendriers", "Analyses", "Configuration"]
+    ["Dashboard", "Ingestion des Données", "Ingestion Daily (EOD)", "Silver - Fill Gaps", "Audit Silver", "Récup Prix", "Average Day", "Audit Bronze UTC", "Calendriers", "Analyses", "Configuration"]
 )
 
 # Initialiser l'ingestion des données
@@ -320,53 +320,304 @@ elif page == "Ingestion des Données":
             except Exception as e:
                 st.error(f"Erreur lors du chargement des données : {str(e)}")
 
+elif page == "Ingestion Daily (EOD)":
+    # Section Ingestion Daily (EOD)
+    st.header("🗓️ Ingestion Daily (EOD)")
+
+    tab1, tab2 = st.tabs(["📁 Fichier Unique", "📂 Répertoire"])
+
+    with tab1:
+        st.subheader("Traitement d'un fichier Daily")
+        uploaded_file = st.file_uploader(
+            "Choisir un fichier (ZIP, CSV, TXT)",
+            type=["zip", "csv", "txt"],
+            key="daily_uploader_file"
+        )
+
+        if uploaded_file is not None:
+            temp_path = f"temp_{uploaded_file.name}"
+            with open(temp_path, "wb") as f:
+                f.write(uploaded_file.getbuffer())
+
+            asset_type = st.selectbox(
+                "Type d'asset",
+                ["stock", "etf", "future", "crypto", "forex", "index"],
+                key="daily_file_asset_type"
+            )
+
+            st.info(f"📁 Fichier : {uploaded_file.name}")
+            st.info("🔍 Symbole : détection automatique depuis le nom du fichier")
+
+            if st.button("Traiter le fichier Daily", key="daily_process_file_btn"):
+                try:
+                    with st.spinner("Traitement en cours..."):
+                        results = st.session_state.data_ingestion_daily.process_file(temp_path, asset_type)
+                    st.success("✅ Traitement Daily terminé !")
+                    st.json(results)
+                except Exception as e:
+                    st.error(f"❌ Erreur Daily : {str(e)}")
+                finally:
+                    if os.path.exists(temp_path):
+                        os.remove(temp_path)
+
+    with tab2:
+        st.subheader("Traitement d'un répertoire Daily")
+        source_dir = st.text_input("Chemin du répertoire source", key="daily_source_dir")
+
+        if source_dir:
+            asset_type_dir = st.selectbox(
+                "Type d'asset",
+                ["stock", "etf", "future", "crypto", "forex", "index"],
+                key="daily_dir_asset_type"
+            )
+
+            if st.button("Traiter Daily", key="daily_process_dir_btn"):
+                try:
+                    source_path = Path(source_dir)
+                    if not source_path.exists():
+                        st.error("Répertoire non trouvé")
+                        st.stop()
+
+                    supported_files = list(source_path.glob("*.csv")) + list(source_path.glob("*.txt")) + list(source_path.glob("*.zip"))
+                    if not supported_files:
+                        st.warning("Aucun fichier Daily trouvé")
+                        st.stop()
+
+                    total_results = {"fichiers_traités": 0, "lignes_traitées": 0, "erreurs": 0}
+                    progress = st.progress(0)
+
+                    for idx, file in enumerate(supported_files):
+                        st.write(f"Traitement de {file.name}...")
+                        results = st.session_state.data_ingestion_daily.process_file(str(file), asset_type_dir)
+                        total_results["fichiers_traités"] += results.get("fichiers_traités", 0)
+                        total_results["lignes_traitées"] += results.get("lignes_traitées", 0)
+                        total_results["erreurs"] += results.get("erreurs", 0)
+                        progress.progress((idx + 1) / len(supported_files))
+
+                    st.success(f"""Traitement Daily terminé !
+                    - Fichiers traités : {total_results['fichiers_traités']}
+                    - Lignes traitées : {total_results['lignes_traitées']}
+                    - Erreurs : {total_results['erreurs']}""")
+                except Exception as e:
+                    st.error(f"Erreur Daily : {str(e)}")
+
 elif page == "Calendriers":
     st.header("🗓️ Sessions & Mapping")
-
-    def discover_symbols_for(asset_type: str) -> list:
-        symbols = set()
-        base = Path("data")
-        for tier in ["bronze", "daily"]:
-            d = base / tier / f"asset_class={asset_type}"
-            if d.exists():
-                for sd in d.iterdir():
-                    if sd.is_dir() and sd.name.startswith("symbol="):
-                        symbols.add(sd.name.replace("symbol=", ""))
-        return sorted(symbols)
 
     # Templates
     templates = TradingSessionTemplates()
     with st.expander("📚 Templates de sessions", expanded=True):
         st.json(templates.templates)
 
-    # Mapping symboles -> template
-    with st.expander("🔗 Mapping symboles → template", expanded=True):
+    # Auto-mapping par répertoire
+    with st.expander("🤖 Auto-mapping par répertoire", expanded=True):
         reg = SymbolSessionRegistry()
-        asset_sel = st.selectbox("Type d'asset", ["stock", "etf", "future", "crypto", "forex", "index"], key="map_asset")
-        symbols = discover_symbols_for(asset_sel)
-        sel_symbols = st.multiselect("Symboles", symbols)
-        tpl_name = st.selectbox("Template", list(templates.templates.keys()), key="map_tpl")
-        colA, colB = st.columns(2)
-        with colA:
-            if st.button("Appliquer au(x) symbole(s)"):
-                for s in sel_symbols:
-                    reg.set(s, tpl_name)
-                st.success(f"Mapping appliqué à {len(sel_symbols)} symbole(s)")
-        with colB:
-            csv_map = st.file_uploader("Import CSV mappings (key,template)", type=["csv"], key="map_csv")
-            if csv_map and st.button("Importer CSV"):
-                import io as _io
-                import csv
-                content = _io.StringIO(csv_map.getvalue().decode("utf-8"))
-                reader = csv.reader(content)
-                cnt = 0
-                for row in reader:
-                    if len(row) >= 2:
-                        reg.set(row[0], row[1])
-                        cnt += 1
-                st.success(f"{cnt} mappings importés")
-        st.write("Mappings actuels (extrait):")
-        st.json({k: reg.map[k] for k in list(reg.map.keys())[:50]})
+        
+        # Répertoire à scanner
+        base_dir = st.text_input("📁 Chemin du répertoire à scanner", value="data", key="auto_base_dir")
+        
+        # Template à appliquer
+        template_to_apply = st.selectbox(
+            "Template à appliquer", 
+            list(templates.templates.keys()), 
+            key="auto_template"
+        )
+        
+        if st.button("🚀 Mapper tous les symboles", type="primary"):
+            try:
+                with st.spinner("Scan..."):
+                    base_path = Path(base_dir)
+                    if not base_path.exists():
+                        st.error(f"Répertoire introuvable: {base_path}")
+                        st.stop()
+                    
+                    mapped_count = 0
+                    total_count = 0
+                    details = []
+                    
+                    def extract_symbol_from_filename(filename: str) -> str:
+                        """Extrait le symbole du nom de fichier (avant le premier _)"""
+                        name = filename.split('.')[0]  # Enlever l'extension
+                        return name.split('_')[0]  # Prendre la partie avant le premier _
+                    
+                    # Cas 1: Structure organisée (bronze/, silver/, daily/)
+                    has_organized_structure = False
+                    for tier in ["bronze", "silver", "daily"]:
+                        tier_dir = base_path / tier
+                        if tier_dir.exists():
+                            has_organized_structure = True
+                            # Tous les asset_class=*
+                            for asset_dir in tier_dir.iterdir():
+                                if not (asset_dir.is_dir() and asset_dir.name.startswith("asset_class=")):
+                                    continue
+                                    
+                                # Tous les symbol=*
+                                for symbol_dir in asset_dir.iterdir():
+                                    if symbol_dir.is_dir() and symbol_dir.name.startswith("symbol="):
+                                        symbol = symbol_dir.name.replace("symbol=", "")
+                                        total_count += 1
+                                        
+                                        # Si pas déjà mappé, appliquer le template
+                                        if symbol.upper() not in reg.map:
+                                            reg.set(symbol, template_to_apply)
+                                            mapped_count += 1
+                                            details.append(f"{symbol} → {template_to_apply}")
+                    
+                    # Cas 2: Fichiers directement dans le répertoire
+                    if not has_organized_structure:
+                        # Scanner les fichiers CSV/TXT/ZIP
+                        file_patterns = ["*.csv", "*.txt", "*.zip"]
+                        for pattern in file_patterns:
+                            for file_path in base_path.glob(pattern):
+                                symbol = extract_symbol_from_filename(file_path.name)
+                                total_count += 1
+                                
+                                # Si pas déjà mappé, appliquer le template
+                                if symbol.upper() not in reg.map:
+                                    reg.set(symbol, template_to_apply)
+                                    mapped_count += 1
+                                    details.append(f"{symbol} → {template_to_apply}")
+                
+                st.success(f"✅ Mappé {mapped_count} nouveaux symboles sur {total_count} trouvés")
+                
+                if details:
+                    with st.expander("Détails"):
+                        for detail in details[:50]:
+                            st.write(f"• {detail}")
+                        if len(details) > 50:
+                            st.write(f"... et {len(details) - 50} autres")
+                
+            except Exception as e:
+                st.error(f"Erreur: {str(e)}")
+    
+    # Affichage du mapping actuel
+    with st.expander("📋 Mapping actuel", expanded=False):
+        reg = SymbolSessionRegistry()
+        if reg.map:
+            # Statistiques
+            stats = reg.get_stats()
+            col1, col2 = st.columns(2)
+            with col1:
+                st.metric("Total symboles", stats["total_symbols"])
+            with col2:
+                st.write("**Par template:**")
+                for template, count in stats["templates_used"].items():
+                    st.write(f"• {template}: {count}")
+            
+            # Recherche dans le mapping
+            search_mapping = st.text_input("🔍 Filtrer mapping", placeholder="Ex: AUD, BTC, equity...", key="search_mapping")
+            
+            # Affichage filtré
+            mappings_to_show = reg.map.copy()
+            if search_mapping:
+                search_lower = search_mapping.lower()
+                mappings_to_show = {
+                    symbol: template for symbol, template in reg.map.items()
+                    if search_lower in symbol.lower() or search_lower in template.lower()
+                }
+            
+            if mappings_to_show:
+                # Limiter l'affichage pour performance
+                items_to_show = list(mappings_to_show.items())[:100]
+                
+                st.write(f"**Mapping ({len(items_to_show)} affichés sur {len(mappings_to_show)} trouvés):**")
+                
+                # Tableau avec colonnes
+                for i in range(0, len(items_to_show), 3):
+                    cols = st.columns(3)
+                    for j, col in enumerate(cols):
+                        if i + j < len(items_to_show):
+                            symbol, template = items_to_show[i + j]
+                            with col:
+                                st.write(f"**{symbol}** → `{template}`")
+                
+                if len(mappings_to_show) > 100:
+                    st.info(f"💡 Trop de résultats. Utilisez la recherche pour affiner ({len(mappings_to_show)} au total).")
+                    
+                # Export CSV
+                if st.button("📥 Exporter mapping (CSV)"):
+                    import csv
+                    import io
+                    
+                    output = io.StringIO()
+                    writer = csv.writer(output)
+                    writer.writerow(["symbol", "template"])
+                    for symbol, template in reg.map.items():
+                        writer.writerow([symbol, template])
+                    
+                    st.download_button(
+                        label="💾 Télécharger mapping.csv",
+                        data=output.getvalue(),
+                        file_name="symbol_mapping.csv",
+                        mime="text/csv"
+                    )
+            else:
+                if search_mapping:
+                    st.info("Aucun résultat pour cette recherche.")
+                else:
+                    st.info("Pas de mapping trouvé.")
+        else:
+            st.info("Aucun mapping configuré. Utilisez l'auto-mapping ci-dessus ou la gestion individuelle ci-dessous.")
+
+    # Recherche et gestion individuelle
+    with st.expander("🔍 Recherche & mapping individuel", expanded=True):
+        reg = SymbolSessionRegistry()
+        stats = reg.get_stats()
+        
+        col1, col2 = st.columns(2)
+        with col1:
+            st.metric("Symboles mappés", stats["total_symbols"])
+        with col2:
+            st.write("**Templates utilisés:**")
+            for tpl, count in stats["templates_used"].items():
+                st.write(f"• {tpl}: {count}")
+        
+        # Recherche
+        search_query = st.text_input("🔍 Rechercher symboles", placeholder="Ex: AAPL, EUR, BTC...", key="symbol_search")
+        
+        if search_query:
+            matches = reg.search_symbols(search_query, limit=50)
+            if matches:
+                st.write(f"**{len(matches)} résultat(s) trouvé(s):**")
+                
+                # Édition en ligne
+                for i, match in enumerate(matches):
+                    col1, col2, col3 = st.columns([2, 2, 1])
+                    with col1:
+                        st.write(f"**{match['symbol']}**")
+                    with col2:
+                        new_template = st.selectbox(
+                            "Template", 
+                            list(templates.templates.keys()), 
+                            index=list(templates.templates.keys()).index(match['template']) if match['template'] in templates.templates else 0,
+                            key=f"edit_{match['symbol']}_{i}"
+                        )
+                        if new_template != match['template']:
+                            reg.set(match['symbol'], new_template)
+                            st.rerun()
+                    with col3:
+                        if st.button("🗑️", key=f"del_{match['symbol']}_{i}", help="Supprimer"):
+                            reg.map.pop(match['symbol'].upper(), None)
+                            reg._save()
+                            st.rerun()
+            else:
+                st.info("Aucun résultat trouvé")
+        
+        # Import CSV
+        st.write("**Import CSV (symbol,template):**")
+        csv_map = st.file_uploader("Fichier CSV", type=["csv"], key="map_csv")
+        if csv_map and st.button("Importer CSV"):
+            import io as _io
+            import csv
+            content = _io.StringIO(csv_map.getvalue().decode("utf-8"))
+            reader = csv.reader(content)
+            cnt = 0
+            for row in reader:
+                if len(row) >= 2:
+                    reg.set(row[0], row[1])
+                    cnt += 1
+            st.success(f"{cnt} mappings importés")
+            st.rerun()
 
 elif page == "Silver - Fill Gaps":
     st.header("💿 Silver: Fill Gaps")
@@ -613,11 +864,35 @@ elif page == "Average Day":
         return sorted(symbols)
 
     asset = st.selectbox("Type d'asset", ["stock", "etf", "future", "crypto", "forex", "index"], key="avg_asset")
-    syms = _discover_silver_symbols_avg(asset)
-    if not syms:
-        st.warning("Aucune donnée Silver disponible pour ce type d'asset.")
-        st.stop()
-    sym = st.selectbox("Symbole", syms, key="avg_symbol")
+    
+    # Interface de recherche pour 5000+ symboles
+    search_symbol = st.text_input("🔍 Rechercher symbole", placeholder="Ex: AAPL, MSFT, EUR...", key="avg_search")
+    
+    if search_symbol:
+        syms = _discover_silver_symbols_avg(asset)
+        # Filtrer par recherche
+        search_lower = search_symbol.lower()
+        filtered_syms = [s for s in syms if search_lower in s.lower()][:50]  # Limiter à 50
+        
+        if not filtered_syms:
+            st.warning(f"Aucun symbole trouvé pour '{search_symbol}' dans {asset}")
+            st.stop()
+        
+        if len(filtered_syms) == 1:
+            sym = filtered_syms[0]
+            st.success(f"Symbole sélectionné: **{sym}**")
+        else:
+            st.write(f"**{len(filtered_syms)} résultat(s) trouvé(s):**")
+            sym = st.selectbox("Choisir le symbole", filtered_syms, key="avg_symbol_filtered")
+    else:
+        # Affichage classique mais limité
+        syms = _discover_silver_symbols_avg(asset)[:100]  # Limiter à 100 pour la performance
+        if not syms:
+            st.warning("Aucune donnée Silver disponible pour ce type d'asset.")
+            st.stop()
+        sym = st.selectbox("Symbole (100 premiers)", syms, key="avg_symbol")
+        if len(_discover_silver_symbols_avg(asset)) > 100:
+            st.info("💡 Plus de 100 symboles disponibles. Utilisez la recherche ci-dessus pour plus de choix.")
     
     price_col = st.selectbox("Colonne de prix", ["close", "open", "high", "low"], index=0, key="avg_price")
 
@@ -630,14 +905,60 @@ elif page == "Average Day":
                 st.error(f"Erreur: {metadata.get('error', 'Aucune donnée')}")
                 st.stop()
 
-            # Métadonnées
-            col1, col2, col3 = st.columns(3)
+            # Statistiques compactes + min/max et pourcentage annualisé
+            try:
+                price_max = float(df_avg["avg_price"].max()) if not df_avg.empty else None
+                price_min = float(df_avg["avg_price"].min()) if not df_avg.empty else None
+                # Heures associées
+                max_hhmm = None
+                min_hhmm = None
+                if price_max is not None and not df_avg.empty:
+                    idxmax = df_avg["avg_price"].idxmax()
+                    if idxmax is not None and idxmax in df_avg.index:
+                        max_hhmm = str(df_avg.loc[idxmax, "hhmm"]) if "hhmm" in df_avg.columns else None
+                if price_min is not None and not df_avg.empty:
+                    idxmin = df_avg["avg_price"].idxmin()
+                    if idxmin is not None and idxmin in df_avg.index:
+                        min_hhmm = str(df_avg.loc[idxmin, "hhmm"]) if "hhmm" in df_avg.columns else None
+
+                pct_ann = None
+                if price_max is not None and price_min is not None and price_min != 0:
+                    pct_ann = ((price_max / price_min) - 1.0) * 250.0 * 100.0
+            except Exception:
+                price_max = price_min = pct_ann = None
+                max_hhmm = min_hhmm = None
+
+            small_css = "font-size:14px; line-height:18px; margin-bottom:4px;"
+            val_css = "font-size:18px; font-weight:600;"
+            box_css = "padding:8px 10px; border:1px solid #eee; border-radius:6px; background:#fafafa;"
+
+            col1, col2, col3, col4, col5, col6 = st.columns(6)
             with col1:
-                st.metric("Observations totales", f"{metadata.get('total_observations', 0):,}")
+                st.markdown(f"<div style='{box_css}'><div style='{small_css}'>Observations totales</div><div style='{val_css}'>" 
+                            f"{metadata.get('total_observations', 0):,}" 
+                            f"</div></div>", unsafe_allow_html=True)
             with col2:
-                st.metric("Minutes uniques", metadata.get('unique_minutes', 0))
+                st.markdown(f"<div style='{box_css}'><div style='{small_css}'>Minutes uniques</div><div style='{val_css}'>" 
+                            f"{metadata.get('unique_minutes', 0)}" 
+                            f"</div></div>", unsafe_allow_html=True)
             with col3:
-                st.metric("Timezone", metadata.get('timezone', 'UTC'))
+                st.markdown(f"<div style='{box_css}'><div style='{small_css}'>Timezone</div><div style='{val_css}'>" 
+                            f"{metadata.get('timezone', 'UTC')}" 
+                            f"</div></div>", unsafe_allow_html=True)
+            with col4:
+                max_display = (f"{price_max:.3f} @ {max_hhmm}" if price_max is not None and max_hhmm else (f"{price_max:.3f}" if price_max is not None else "N/A"))
+                st.markdown(f"<div style='{box_css}'><div style='{small_css}'>Max</div><div style='{val_css}'>" 
+                            f"{max_display}" 
+                            + "</div></div>", unsafe_allow_html=True)
+            with col5:
+                min_display = (f"{price_min:.3f} @ {min_hhmm}" if price_min is not None and min_hhmm else (f"{price_min:.3f}" if price_min is not None else "N/A"))
+                st.markdown(f"<div style='{box_css}'><div style='{small_css}'>Min</div><div style='{val_css}'>" 
+                            f"{min_display}" 
+                            + "</div></div>", unsafe_allow_html=True)
+            with col6:
+                st.markdown(f"<div style='{box_css}'><div style='{small_css}'>Pct annuel estimé</div><div style='{val_css}'>" 
+                            f"{pct_ann:.2f}%" if pct_ann is not None else "N/A" 
+                            + "</div></div>", unsafe_allow_html=True)
 
             # Graphique
             st.subheader("Graphique Average Day")

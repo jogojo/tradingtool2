@@ -78,26 +78,11 @@ class GapFiller:
 
         # Générer la grille de minutes en local puis convertir vers UTC
         local_minutes = self.generate_session_minutes(trading_date, tpl)
-        # Logs de diagnostic des bornes de session
-        import logging
-        logging.getLogger(__name__).info(
-            "Session locale %s: start=%s end=%s (size=%d)",
-            session_name,
-            local_minutes[0] if len(local_minutes) else None,
-            local_minutes[-1] if len(local_minutes) else None,
-            len(local_minutes),
-        )
+        
         if sys.version_info >= (3, 9):
             utc_minutes = local_minutes.tz_convert(ZoneInfo("UTC"))
         else:
             utc_minutes = local_minutes.tz_convert(pytz.UTC)
-        logging.getLogger(__name__).info(
-            "Session UTC %s: start=%s end=%s (size=%d)",
-            session_name,
-            utc_minutes[0] if len(utc_minutes) else None,
-            utc_minutes[-1] if len(utc_minutes) else None,
-            len(utc_minutes),
-        )
 
         # Préparer les données d'origine indexées par minute UTC
         df = df_minute.copy()
@@ -125,7 +110,39 @@ class GapFiller:
             out["filled_from_ts"] = pd.NaT
 
         # CORRECTION: Pour les minutes synthétiques, O=H=L=C=last_close
-        # D'abord propager seulement le close
+        # GESTION DEBUT DE SESSION: Si première minute manque, utiliser close daily précédent
+        
+        # Vérifier si première minute de session manque
+        first_minute_missing = out.iloc[0]["close"] if len(out) > 0 else None
+        first_minute_missing = pd.isna(first_minute_missing)
+        
+        if first_minute_missing:
+            # Fallback: utiliser close de la veille depuis daily si disponible
+            try:
+                # Trouver le close daily précédent pour ce trading_date
+                prev_date = trading_date - timedelta(days=1)
+                # Chercher dans les 5 jours précédents pour trouver un trading day
+                fallback_close = None
+                for i in range(1, 6):
+                    check_date = trading_date - timedelta(days=i)
+                    # TODO: Ici il faudrait accéder aux données daily pour récupérer le close
+                    # Pour l'instant, on utilise la première valeur disponible dans la session
+                    break
+                
+                # Si aucun fallback daily, utiliser la première valeur réelle de la session
+                first_real_close = out["close"].dropna()
+                if not first_real_close.empty:
+                    fallback_close = first_real_close.iloc[0]
+                    # Propager vers l'arrière (backfill) jusqu'à la première minute
+                    out["close"] = out["close"].bfill()
+                    
+            except Exception:
+                # Dernière option: propager la première valeur réelle vers l'arrière
+                first_real_close = out["close"].dropna()
+                if not first_real_close.empty:
+                    out["close"] = out["close"].bfill()
+        
+        # Forward fill normal
         out["close"] = out["close"].ffill()
         
         # Pour les lignes remplies, mettre O=H=L=C (pas de propagation des high/low)
@@ -135,14 +152,17 @@ class GapFiller:
         out.loc[out["filled"], "low"] = last_close.loc[out["filled"]]
         
         # Pour les lignes réelles, propager normalement O/H/L si manquantes
-        out[["open", "high", "low"]] = out[["open", "high", "low"]].ffill()
+        out[["open", "high", "low"]] = out[["open", "high", "low"]].bfill().ffill()
         
         # Volume 0 pour lignes remplies
         out.loc[out["filled"], "volume"] = 0
         out["volume"] = out["volume"].fillna(0)  # Au cas où volume réel manquant
         
         # filled_from_ts = dernière timestamp non nulle précédente
-        prev_real_ts = out.index.to_series().where(~out["filled"]).ffill()
+        # GESTION DEBUT: Si première minute manque, pas de filled_from_ts pour elle
+        prev_real_ts = out.index.to_series().where(~out["filled"])
+        # Backfill puis forward fill pour gérer début de session
+        prev_real_ts = prev_real_ts.bfill().ffill()
         # IMPORTANT: ne pas utiliser .values (qui droppe le tz). Assigner la série directement.
         try:
             out.loc[out["filled"], "filled_from_ts"] = prev_real_ts.loc[out["filled"]]

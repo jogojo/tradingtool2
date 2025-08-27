@@ -44,3 +44,69 @@ class SymbolSessionRegistry:
     def _save(self) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.path.write_text(json.dumps(self.map, indent=2), encoding="utf-8")
+    
+    def auto_map_by_directory(self, base_dir: Path, template_mapping: dict) -> dict:
+        """
+        Mapping automatique par répertoire.
+        template_mapping: {"stock": "equity_us_rth", "future": "futures_grains_cme", ...}
+        Retourne: {"mapped": count, "total": count, "details": list}
+        """
+        mapped_count = 0
+        total_count = 0
+        details = []
+        
+        for asset_class, template in template_mapping.items():
+            # Chercher dans Bronze et Silver
+            for tier in ["bronze", "silver", "daily"]:
+                asset_dir = base_dir / tier / f"asset_class={asset_class}"
+                if not asset_dir.exists():
+                    continue
+                    
+                for symbol_dir in asset_dir.iterdir():
+                    if symbol_dir.is_dir() and symbol_dir.name.startswith("symbol="):
+                        symbol = symbol_dir.name.replace("symbol=", "")
+                        total_count += 1
+                        
+                        # Si pas déjà mappé, appliquer le template
+                        if symbol.upper() not in self.map:
+                            self.set(symbol, template)
+                            mapped_count += 1
+                            details.append(f"{symbol} → {template}")
+        
+        return {
+            "mapped": mapped_count,
+            "total": total_count, 
+            "details": details
+        }
+    
+    def search_symbols(self, query: str, limit: int = 50) -> list:
+        """
+        Recherche de symboles par pattern (case-insensitive).
+        Retourne max `limit` résultats.
+        """
+        if not query:
+            return []
+            
+        query_lower = query.lower()
+        matches = []
+        
+        for symbol, template in self.map.items():
+            if query_lower in symbol.lower():
+                matches.append({"symbol": symbol, "template": template})
+                if len(matches) >= limit:
+                    break
+        
+        return sorted(matches, key=lambda x: x["symbol"])
+    
+    def get_stats(self) -> dict:
+        """Statistiques du registry."""
+        from collections import Counter
+        templates = Counter(self.map.values())
+        return {
+            "total_symbols": len(self.map),
+            "templates_used": dict(templates),
+        }
+    
+    def get_all(self) -> dict:
+        """Retourne tous les mappings (pour compatibilité)."""
+        return self.map.copy()
