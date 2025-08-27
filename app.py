@@ -8,9 +8,17 @@ import io
 import sys
 import time
 import contextlib
+import pyarrow.dataset as ds
 
 # Import du module d'ingestion
 from src.data.ingestion import DataIngestion
+from src.data.ingestion_daily import DataIngestionDaily
+from src.calendar.session_loader import TradingSessionTemplates, SymbolSessionRegistry
+from src.silver.run_fill import run_gap_fill_for_symbol
+from src.tools.audit_bronze_utc import audit_bronze
+from src.tools.audit_silver import audit_silver as audit_silver_tool
+from src.tools.fetch_prices import fetch_prices, fetch_prices_at_hhmm
+from src.tools.average_day import compute_average_day, plot_average_day
 
 # Configuration du logging pour capturer les logs
 class StreamlitHandler(logging.Handler):
@@ -44,7 +52,7 @@ st.markdown("---")
 st.sidebar.title("Navigation")
 page = st.sidebar.selectbox(
     "Choisir une section",
-    ["Dashboard", "Ingestion des Données", "Calendriers", "Analyses", "Configuration"]
+    ["Dashboard", "Ingestion des Données", "Silver - Fill Gaps", "Audit Silver", "Récup Prix", "Average Day", "Audit Bronze UTC", "Calendriers", "Analyses", "Configuration"]
 )
 
 # Initialiser l'ingestion des données
@@ -53,6 +61,13 @@ if 'data_ingestion' not in st.session_state:
         st.session_state.data_ingestion = DataIngestion()
     except Exception as e:
         st.error(f"Erreur d'initialisation : {e}")
+
+# Initialiser l'ingestion daily
+if 'data_ingestion_daily' not in st.session_state:
+    try:
+        st.session_state.data_ingestion_daily = DataIngestionDaily()
+    except Exception as e:
+        st.error(f"Erreur d'initialisation daily : {e}")
 
 # Dashboard principal
 if page == "Dashboard":
@@ -306,24 +321,407 @@ elif page == "Ingestion des Données":
                 st.error(f"Erreur lors du chargement des données : {str(e)}")
 
 elif page == "Calendriers":
-    st.header("Calendriers de Trading")
+    st.header("🗓️ Sessions & Mapping")
+
+    def discover_symbols_for(asset_type: str) -> list:
+        symbols = set()
+        base = Path("data")
+        for tier in ["bronze", "daily"]:
+            d = base / tier / f"asset_class={asset_type}"
+            if d.exists():
+                for sd in d.iterdir():
+                    if sd.is_dir() and sd.name.startswith("symbol="):
+                        symbols.add(sd.name.replace("symbol=", ""))
+        return sorted(symbols)
+
+    # Templates
+    templates = TradingSessionTemplates()
+    with st.expander("📚 Templates de sessions", expanded=True):
+        st.json(templates.templates)
+
+    # Mapping symboles -> template
+    with st.expander("🔗 Mapping symboles → template", expanded=True):
+        reg = SymbolSessionRegistry()
+        asset_sel = st.selectbox("Type d'asset", ["stock", "etf", "future", "crypto", "forex", "index"], key="map_asset")
+        symbols = discover_symbols_for(asset_sel)
+        sel_symbols = st.multiselect("Symboles", symbols)
+        tpl_name = st.selectbox("Template", list(templates.templates.keys()), key="map_tpl")
+        colA, colB = st.columns(2)
+        with colA:
+            if st.button("Appliquer au(x) symbole(s)"):
+                for s in sel_symbols:
+                    reg.set(s, tpl_name)
+                st.success(f"Mapping appliqué à {len(sel_symbols)} symbole(s)")
+        with colB:
+            csv_map = st.file_uploader("Import CSV mappings (key,template)", type=["csv"], key="map_csv")
+            if csv_map and st.button("Importer CSV"):
+                import io as _io
+                import csv
+                content = _io.StringIO(csv_map.getvalue().decode("utf-8"))
+                reader = csv.reader(content)
+                cnt = 0
+                for row in reader:
+                    if len(row) >= 2:
+                        reg.set(row[0], row[1])
+                        cnt += 1
+                st.success(f"{cnt} mappings importés")
+        st.write("Mappings actuels (extrait):")
+        st.json({k: reg.map[k] for k in list(reg.map.keys())[:50]})
+
+elif page == "Silver - Fill Gaps":
+    st.header("💿 Silver: Fill Gaps")
+
+    def discover_symbols_for(asset_type: str) -> list:
+        symbols = set()
+        base = Path("data")
+        for tier in ["bronze", "daily"]:
+            d = base / tier / f"asset_class={asset_type}"
+            if d.exists():
+                for sd in d.iterdir():
+                    if sd.is_dir() and sd.name.startswith("symbol="):
+                        symbols.add(sd.name.replace("symbol=", ""))
+        return sorted(symbols)
+
+    templates = TradingSessionTemplates()
+    with st.expander("▶️ Lancer", expanded=True):
+        asset_fg = st.selectbox("Type d'asset", ["stock", "etf", "future", "crypto", "forex", "index"], key="fg_asset")
+        all_syms = discover_symbols_for(asset_fg)
+        sel_syms = st.multiselect("Symboles (multi)", all_syms, default=all_syms[:1], key="fg_symbols")
+        reg = SymbolSessionRegistry()
+        tpl_fg = st.selectbox("Template de session (défaut si non mappé)", list(templates.templates.keys()), index=0)
+        col1, col2 = st.columns(2)
+        with col1:
+            sd = st.date_input("Date début (optionnel)", value=None)
+        with col2:
+            ed = st.date_input("Date fin (optionnel)", value=None)
+
+        # Aperçu compteurs d'années attendues (daily) vs déjà remplies (silver)
+        if sel_syms:
+            stats = []
+            for s in sel_syms:
+                daily_dir = Path("data") / "daily" / f"asset_class={asset_fg}" / f"symbol={s}"
+                silver_dir = Path("data") / "silver" / f"asset_class={asset_fg}" / f"symbol={s}"
+                years = 0
+                years_silver = 0
+                if daily_dir.exists():
+                    dset = ds.dataset(daily_dir, format="parquet")
+                    tbl = dset.to_table()
+                    df = tbl.to_pandas()
+                    if not df.empty:
+                        if sd:
+                            df = df[df["date"] >= pd.to_datetime(sd).date()]
+                        if ed:
+                            df = df[df["date"] <= pd.to_datetime(ed).date()]
+                        years = len(pd.Series(df["date"]).apply(lambda d: d.year).unique())
+                # Compter les années déjà écrites en silver (par répertoires year=YYYY)
+                if silver_dir.exists():
+                    years_silver = len([d for d in silver_dir.iterdir() if d.is_dir() and d.name.startswith("year=")])
+                stats.append({
+                    "symbole": s,
+                    "années_attendues_daily": years,
+                    "années_deja_filled": years_silver,
+                    "template": reg.get(s) or tpl_fg
+                })
+            df_stats = pd.DataFrame(stats)
+            st.write("Aperçu années par symbole (attendues vs déjà filled):")
+            st.dataframe(df_stats, use_container_width=True)
+            # Résumé total
+            st.info(f"Total années attendues: {int(df_stats['années_attendues_daily'].sum())} | Déjà filled: {int(df_stats['années_deja_filled'].sum())}")
+
+        if st.button("▶️ Exécuter Fill Gaps (multi)") and sel_syms:
+            progress = st.progress(0)
+            summary = {"symbols_processed": 0, "details": []}
+            total_expected_years = 0
+            total_filled_years_before = 0
+            # Snapshot avant exécution
+            pre = {}
+            for s in sel_syms:
+                silver_dir = Path("data") / "silver" / f"asset_class={asset_fg}" / f"symbol={s}"
+                years_silver = len([d for d in silver_dir.iterdir() if d.is_dir() and d.name.startswith("year=")]) if silver_dir.exists() else 0
+                pre[s] = years_silver
+            for i, s in enumerate(sel_syms):
+                try:
+                    res = run_gap_fill_for_symbol(
+                        base_data_dir="data",
+                        asset_type=asset_fg,
+                        symbol=s,
+                        session_template=reg.get(s) or tpl_fg,
+                        start_date=sd.isoformat() if sd else None,
+                        end_date=ed.isoformat() if ed else None,
+                    )
+                    # recompute years for reporting
+                    daily_dir = Path("data") / "daily" / f"asset_class={asset_fg}" / f"symbol={s}"
+                    years = 0
+                    if daily_dir.exists():
+                        dset = ds.dataset(daily_dir, format="parquet")
+                        df = dset.to_table().to_pandas()
+                        if not df.empty:
+                            if sd:
+                                df = df[df["date"] >= pd.to_datetime(sd).date()]
+                            if ed:
+                                df = df[df["date"] <= pd.to_datetime(ed).date()]
+                            years = len(pd.Series(df["date"]).apply(lambda d: d.year).unique())
+                    total_expected_years += years
+                    summary["details"].append({
+                        "symbole": s,
+                        "années_daily": years,
+                        "processed_days": res.get("processed_days", 0),
+                        "written_files": res.get("written_files", 0)
+                    })
+                    summary["symbols_processed"] += 1
+                except Exception as e:
+                    summary["details"].append({"symbole": s, "erreur": str(e)})
+                progress.progress((i + 1) / len(sel_syms))
+            st.success("Remplissage terminé")
+            st.json(summary)
+            st.info(f"Symboles traités: {summary['symbols_processed']}")
+            # Résumé après exécution
+            post_filled = 0
+            for s in sel_syms:
+                silver_dir = Path("data") / "silver" / f"asset_class={asset_fg}" / f"symbol={s}"
+                years_silver = len([d for d in silver_dir.iterdir() if d.is_dir() and d.name.startswith("year=")]) if silver_dir.exists() else 0
+                post_filled += years_silver
+            pre_filled = sum(pre.values())
+            st.info(f"Années attendues: {total_expected_years} | Déjà filled avant: {pre_filled} | Après: {post_filled}")
+
+elif page == "Audit Bronze UTC":
+    st.header("🔍 Audit Bronze: Timestamps en UTC")
+    st.write("Vérifie que tous les fichiers Parquet de la Bronze ont une colonne 'timestamp' tz-aware en UTC.")
+
+    base_dir = st.text_input("Répertoire des données", value="./data", key="audit_base")
+    verbose = st.checkbox("Mode verbeux (afficher chaque fichier)", value=False, key="audit_verbose")
+
+    if st.button("Lancer l'audit", type="primary"):
+        try:
+            with st.spinner("Audit en cours..."):
+                results, issues_summary = audit_bronze(Path(base_dir))
+
+            total = len(results)
+            ok = sum(1 for r in results if r.get("arrow_ok") and not r.get("issues"))
+            to_fix = total - ok
+
+            colA, colB, colC = st.columns(3)
+            with colA:
+                st.metric("Fichiers scannés", total)
+            with colB:
+                st.metric("Fichiers OK", ok)
+            with colC:
+                st.metric("À corriger", to_fix)
+
+            if issues_summary:
+                st.subheader("Problèmes détectés")
+                st.dataframe(
+                    pd.DataFrame(
+                        [{"issue": k, "count": v} for k, v in sorted(issues_summary.items(), key=lambda kv: (-kv[1], kv[0]))]
+                    ),
+                    use_container_width=True
+                )
+
+            if verbose:
+                st.subheader("Détails par fichier")
+                st.dataframe(pd.DataFrame(results), use_container_width=True)
+
+            st.success("Audit terminé")
+        except Exception as e:
+            st.error(f"Erreur durant l'audit: {e}")
+
+elif page == "Récup Prix":
+    st.header("🎯 Récupération de prix (Silver)")
+    st.write("Récupère les OHLCV aux minutes exactes renseignées.")
+
+    def _discover_silver_symbols(asset_type: str) -> list:
+        symbols = set()
+        base = Path("data") / "silver" / f"asset_class={asset_type}"
+        if base.exists():
+            for sd in base.iterdir():
+                if sd.is_dir() and sd.name.startswith("symbol="):
+                    symbols.add(sd.name.replace("symbol=", ""))
+        return sorted(symbols)
+
+    asset = st.selectbox("Type d'asset", ["stock", "etf", "future", "crypto", "forex", "index"], key="px_asset")
+    syms = _discover_silver_symbols(asset)
+    if not syms:
+        st.warning("Aucune donnée Silver disponible pour ce type d'asset.")
+        st.stop()
+    sym = st.selectbox("Symbole", syms, key="px_symbol")
+
+    st.write("Saisir: soit des timestamps UTC (une par ligne), soit une heure 'HH:MM' (ex: 23:03 ou 23.03). Choisir la timezone pour HH:MM.")
+    txt = st.text_area("Entrées", height=160, key="px_ts")
+    tz_options = [
+        "UTC",
+        "Europe/London", 
+        "Europe/Paris",
+        "America/New_York",
+        "Asia/Shanghai"
+    ]
+    tz_choice = st.selectbox("Timezone pour HH:MM", tz_options, index=0, key="px_tz")
+
+    if st.button("Récupérer"):
+        try:
+            raw_lines = [l.strip() for l in txt.splitlines() if l.strip()]
+            if not raw_lines:
+                st.warning("Aucun timestamp fourni.")
+                st.stop()
+
+            # Si une seule ligne au format HH:MM → recherche sur toute l'historique
+            if len(raw_lines) == 1:
+                cand = raw_lines[0].replace(".", ":")
+                if len(cand) == 5 and cand[2] == ":":
+                    out = fetch_prices_at_hhmm(Path("data"), asset, sym, cand, timezone=tz_choice)
+                else:
+                    ts_parse = [pd.to_datetime(cand, utc=True, errors="raise")]
+                    out = fetch_prices(Path("data"), asset, sym, ts_parse)
+            else:
+                # Sinon, parse en UTC (lignes ISO) et fetch exact
+                ts_parse = [pd.to_datetime(l, utc=True, errors="raise") for l in raw_lines]
+                out = fetch_prices(Path("data"), asset, sym, ts_parse)
+
+            st.success(f"Trouvé {len(out)} minute(s)")
+            # Séparer date et heure localisées selon tz_choice + UTC
+            df_show = out.copy()
+            if not df_show.empty:
+                ts_utc = pd.to_datetime(df_show["timestamp"], utc=True)
+                ts_local = ts_utc.dt.tz_convert(tz_choice)
+                
+                df_show["date"] = ts_local.dt.date.astype(str)
+                df_show["heure"] = ts_local.dt.strftime("%H:%M")
+                df_show["heure_utc"] = ts_utc.dt.strftime("%H:%M")
+                
+                # Ordonner colonnes: date, heure (locale), heure_utc, ohlcv, filled_from_ts
+                cols = [c for c in ["date","heure","heure_utc","open","high","low","close","volume","filled_from_ts"] if c in df_show.columns]
+                df_show = df_show[cols]
+            st.dataframe(df_show, use_container_width=True)
+
+            # téléchargement CSV
+            csv = df_show.to_csv(index=False).encode("utf-8")
+            st.download_button("Télécharger CSV", data=csv, file_name=f"{asset}_{sym}_prices.csv", mime="text/csv")
+
+        except Exception as e:
+            st.error(f"Erreur: {e}")
+
+elif page == "Average Day":
+    st.header("📊 Average Day")
+    st.write("Calcul du profil intraday moyen pour un sous-jacent (timezone locale + session).")
+
+    def _discover_silver_symbols_avg(asset_type: str) -> list:
+        symbols = set()
+        base = Path("data") / "silver" / f"asset_class={asset_type}"
+        if base.exists():
+            for sd in base.iterdir():
+                if sd.is_dir() and sd.name.startswith("symbol="):
+                    symbols.add(sd.name.replace("symbol=", ""))
+        return sorted(symbols)
+
+    asset = st.selectbox("Type d'asset", ["stock", "etf", "future", "crypto", "forex", "index"], key="avg_asset")
+    syms = _discover_silver_symbols_avg(asset)
+    if not syms:
+        st.warning("Aucune donnée Silver disponible pour ce type d'asset.")
+        st.stop()
+    sym = st.selectbox("Symbole", syms, key="avg_symbol")
     
-    st.subheader("Configuration des Marchés")
-    
-    markets = ["US Stocks", "US Futures", "European Stocks", "Asian Stocks", "Forex", "Crypto"]
-    
-    for market in markets:
-        with st.expander(f"📅 {market}"):
-            col1, col2 = st.columns(2)
-            
+    price_col = st.selectbox("Colonne de prix", ["close", "open", "high", "low"], index=0, key="avg_price")
+
+    if st.button("Calculer Average Day", type="primary"):
+        try:
+            with st.spinner("Calcul de l'average day..."):
+                df_avg, metadata = compute_average_day(Path("data"), asset, sym, price_col)
+
+            if df_avg.empty:
+                st.error(f"Erreur: {metadata.get('error', 'Aucune donnée')}")
+                st.stop()
+
+            # Métadonnées
+            col1, col2, col3 = st.columns(3)
             with col1:
-                st.time_input(f"Heure d'ouverture {market}", value=datetime.strptime("09:30", "%H:%M").time())
-                st.time_input(f"Heure de fermeture {market}", value=datetime.strptime("16:00", "%H:%M").time())
-            
+                st.metric("Observations totales", f"{metadata.get('total_observations', 0):,}")
             with col2:
-                st.checkbox(f"RTH {market}")
-                st.checkbox(f"ETH {market}")
-                st.date_input(f"Date de début {market}", value=datetime(2000, 1, 1))
+                st.metric("Minutes uniques", metadata.get('unique_minutes', 0))
+            with col3:
+                st.metric("Timezone", metadata.get('timezone', 'UTC'))
+
+            # Graphique
+            st.subheader("Graphique Average Day")
+            fig = plot_average_day(df_avg, metadata)
+            st.plotly_chart(fig, use_container_width=True)
+
+            # Tableau des données
+            st.subheader("Données détaillées")
+            st.dataframe(df_avg, use_container_width=True)
+
+            # Téléchargement CSV
+            csv = df_avg.to_csv(index=False).encode("utf-8")
+            st.download_button(
+                "Télécharger CSV",
+                data=csv,
+                file_name=f"{asset}_{sym}_average_day.csv",
+                mime="text/csv"
+            )
+
+        except Exception as e:
+            st.error(f"Erreur lors du calcul: {e}")
+
+elif page == "Audit Silver":
+    st.header("🔎 Audit Silver: Qualité des minutes (UTC)")
+    st.write("Analyse des fichiers Silver (parquet) pour un symbole sur tout l'historique: volumes, minutes réelles vs synthétiques, doublons, min/max timestamps, et tableau complet des comptes par minute de la journée (UTC).")
+
+    # Sélection asset/symbole
+    def _discover_symbols(asset_type: str) -> list:
+        symbols = set()
+        base = Path("data") / "silver" / f"asset_class={asset_type}"
+        if base.exists():
+            for sd in base.iterdir():
+                if sd.is_dir() and sd.name.startswith("symbol="):
+                    symbols.add(sd.name.replace("symbol=", ""))
+        return sorted(symbols)
+
+    asset_type = st.selectbox("Type d'asset", ["stock", "etf", "future", "crypto", "forex", "index"], key="audit_silver_asset")
+    symbols = _discover_symbols(asset_type)
+    if not symbols:
+        st.warning("Aucune donnée Silver pour ce type d'asset.")
+        st.stop()
+
+    symbol = st.selectbox("Symbole", symbols, key="audit_silver_symbol")
+
+    # Base du symbole (on prendra toujours tout l'historique)
+    base_sym = Path("data") / "silver" / f"asset_class={asset_type}" / f"symbol={symbol}"
+
+    if st.button("Analyser l'historique complet", type="primary"):
+        try:
+            with st.spinner("Chargement et audit (toutes années)..."):
+                metrics, per_minute = audit_silver_tool(Path("data"), asset_type, symbol)
+
+            if metrics.get("rows", 0) == 0:
+                st.info("Aucune donnée pour ce symbole.")
+                st.stop()
+
+            colA, colB, colC, colD = st.columns(4)
+            with colA:
+                st.metric("Lignes totales", f"{metrics['rows']:,}")
+            with colB:
+                st.metric("Timestamps uniques", f"{metrics['unique_ts']:,}")
+            with colC:
+                st.metric("Doublons", f"{metrics['duplicates']:,}")
+            with colD:
+                st.metric("Intervalle", f"{metrics['ts_min']} → {metrics['ts_max']}")
+            st.caption(f"Timezone utilisée pour l'audit: {metrics.get('timezone_used', 'UTC')}")
+
+            if metrics.get("has_filled_from_ts"):
+                synth_total = int(per_minute["synth_count"].sum())
+                real_total = int(per_minute["real_count"].sum())
+                col1, col2 = st.columns(2)
+                with col1:
+                    st.metric("Minutes réelles", f"{real_total:,}")
+                with col2:
+                    st.metric("Minutes synthétiques", f"{synth_total:,}")
+
+            st.subheader("Comptes par minute (UTC) — historique complet")
+            st.dataframe(per_minute, use_container_width=True)
+
+            # Astuce: pour détail par année ou doublons, utiliser le script CLI audit_silver.py
+
+            st.success("Audit Silver terminé")
+        except Exception as e:
+            st.error(f"Erreur durant l'audit Silver: {e}")
 
 elif page == "Analyses":
     st.header("Analyses et Moyennes")

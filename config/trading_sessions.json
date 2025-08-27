@@ -1,0 +1,44 @@
+{
+  "equity_us_rth": {
+    "timezone": "America/New_York",
+    "description": "US equities: ETH window with RTH markers (fill 04:00-20:00, RTH 09:30-16:00)",
+    "session": {
+      "open": "04:00",
+      "close": "20:00",
+      "breaks": [],
+      "rth_open": "09:30",
+      "rth_close": "16:00"
+    }
+  },
+  "futures_grains_cme": {
+    "timezone": "America/Chicago",
+    "description": "CME CBOT grains with midday break",
+    "session": {
+      "open": "08:30",
+      "close": "13:20",
+      "breaks": [
+        { "start": "12:00", "end": "12:30" }
+      ]
+    }
+  },
+  "futures_eurex": {
+    "timezone": "Europe/Berlin",
+    "description": "Eurex futures cash session",
+    "session": {
+      "open": "08:00",
+      "close": "22:00",
+      "breaks": []
+    }
+  },
+  "comex_copper": {
+    "timezone": "America/New_York",
+    "description": "COMEX Copper: session starts previous day 18:00, ends 17:00 (RTH 09:30-17:00)",
+    "session": {
+      "open": "18:00",
+      "close": "17:00",
+      "breaks": [],
+      "rth_open": "09:30",
+      "rth_close": "17:00"
+    }
+  }
+}

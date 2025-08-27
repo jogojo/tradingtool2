@@ -167,26 +167,34 @@ class DataIngestion:
     
     def _parse_timestamp_strict(self, df: pd.DataFrame, asset_type: str) -> pd.DataFrame:
         """
-        Parse strict des timestamps selon le format détecté
+        Parse strict des timestamps et normalise en UTC tz-aware pour BRONZE.
+        - forex: format "%Y%m%d %H:%M:%S"
+        - autres: inference pandas
+        - crypto: timestamps fournis en UTC (localisation directe UTC)
+        - autres assets: localiser en Eastern puis convertir en UTC
         """
         try:
+            # 1) Parsing strict
             if asset_type == "forex":
-                # Le forex arrive sous forme "YYYYMMDD HH:MM:SS" (déjà combiné en amont)
                 df['timestamp'] = pd.to_datetime(df['timestamp'], format="%Y%m%d %H:%M:%S", errors="raise")
             else:
-                # Autres assets: laisser pandas inférer (données au format standard)
                 df['timestamp'] = pd.to_datetime(df['timestamp'], errors="raise")
-            
-            # Localiser en Eastern Time (par défaut pour tout sauf crypto), puis convertir en UTC
-            if asset_type != "crypto":
-                df['timestamp'] = df['timestamp'].dt.tz_localize(self.eastern_tz, ambiguous="infer")
+
+            # 2) Normalisation de timezone → UTC tz-aware
+            if pd.api.types.is_datetime64tz_dtype(df['timestamp']):
+                # Déjà timezone-aware → convertir vers UTC si nécessaire
                 df['timestamp'] = df['timestamp'].dt.tz_convert(self.utc_tz)
             else:
-                # Pour crypto, on assume déjà en UTC
-                df['timestamp'] = df['timestamp'].dt.tz_localize(self.utc_tz)
-            
+                # tz-naive → localiser suivant l'asset
+                if asset_type == "crypto":
+                    df['timestamp'] = df['timestamp'].dt.tz_localize(self.utc_tz)
+                else:
+                    # Par défaut (stock/etf/future/forex/index): Eastern → UTC
+                    df['timestamp'] = df['timestamp'].dt.tz_localize(self.eastern_tz, ambiguous="infer")
+                    df['timestamp'] = df['timestamp'].dt.tz_convert(self.utc_tz)
+
             return df
-            
+
         except Exception as e:
             logger.error(f"Erreur parsing timestamp: {e}")
             logger.error(f"Sample timestamps: {df['timestamp'].head()}")
@@ -218,7 +226,7 @@ class DataIngestion:
         self._validate_required_columns(df, asset_type)
         logger.info("✅ Colonnes validées")
         
-        # 2. Parser strict des timestamps
+        # 2. Parser strict des timestamps (UTC tz-aware garanti en sortie)
         logger.info("Parsing des timestamps...")
         df = self._parse_timestamp_strict(df, asset_type)
         logger.info(f"Timestamps parsés, type: {df['timestamp'].dtype}")
@@ -233,6 +241,17 @@ class DataIngestion:
         logger.info(f"Timestamp min: {df['timestamp'].min()}")
         logger.info(f"Timestamp max: {df['timestamp'].max()}")
         
+        # S'assurer d'un dtype explicite datetime64[ns, UTC]
+        try:
+            df['timestamp'] = df['timestamp'].astype('datetime64[ns, UTC]')
+        except Exception:
+            # Fallback robuste: re-parser puis localiser UTC
+            df['timestamp'] = pd.to_datetime(df['timestamp'])
+            if not pd.api.types.is_datetime64tz_dtype(df['timestamp']):
+                df['timestamp'] = df['timestamp'].dt.tz_localize(self.utc_tz)
+            df['timestamp'] = df['timestamp'].astype('datetime64[ns, UTC]')
+
+        # Extraire l'année en UTC (après normalisation)
         df['year'] = df['timestamp'].dt.year
         logger.info(f"Années détectées: {sorted(df['year'].unique())}")
         
@@ -324,6 +343,11 @@ class DataIngestion:
         logger.info(f"Répertoire de base: {base_dir}")
         base_dir.mkdir(parents=True, exist_ok=True)
         
+        # Normaliser le type avant conversion Arrow
+        if not pd.api.types.is_datetime64tz_dtype(df['timestamp']):
+            df['timestamp'] = pd.to_datetime(df['timestamp']).dt.tz_localize(self.utc_tz)
+        df['timestamp'] = df['timestamp'].astype('datetime64[ns, UTC]')
+
         # Convertir en table PyArrow
         table = pa.Table.from_pandas(df)
         logger.info(f"Table PyArrow créée: {table.num_rows} lignes, {table.num_columns} colonnes")
