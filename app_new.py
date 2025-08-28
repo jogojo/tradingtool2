@@ -6,8 +6,7 @@ from src.data.ingestion import DataIngestion
 from src.data.ingestion_daily import DataIngestionDaily
 
 # Import des pages modulaires
-from pages import dashboard, average_day, calendars, ingestion, ingestion_daily, silver_gaps, audit_silver, fetch_prices, audit_bronze, avgday
-from pages import avgday_pct as avgday_pct_page
+from pages import dashboard, average_day, calendars
 
 # Configuration de la page
 st.set_page_config(
@@ -25,7 +24,7 @@ st.markdown("---")
 st.sidebar.title("Navigation")
 page = st.sidebar.selectbox(
     "Choisir une section",
-    ["Dashboard", "Ingestion des Données", "Ingestion Daily (EOD)", "Silver - Fill Gaps", "Audit Silver", "Récup Prix", "Average Day", "AvgDay", "AvgDay %", "Audit Bronze UTC", "Calendriers", "Analyses", "Configuration"]
+    ["Dashboard", "Ingestion des Données", "Ingestion Daily (EOD)", "Silver - Fill Gaps", "Audit Silver", "Récup Prix", "Average Day", "Audit Bronze UTC", "Calendriers", "Analyses", "Configuration"]
 )
 
 # Initialiser l'ingestion des données
@@ -49,32 +48,33 @@ if page == "Dashboard":
 elif page == "Average Day":
     average_day.render()
 
-elif page == "AvgDay":
-    avgday.render()
-
-elif page == "AvgDay %":
-    avgday_pct_page.render()
-
 elif page == "Calendriers":
     calendars.render()
 
+# Pages temporaires (à refactoriser)
 elif page == "Ingestion des Données":
-    ingestion.render()
+    st.header("📊 Ingestion des Données")
+    st.info("🚧 Page en cours de refactorisation...")
 
 elif page == "Ingestion Daily (EOD)":
-    ingestion_daily.render()
+    st.header("🗓️ Ingestion Daily (EOD)")
+    st.info("🚧 Page en cours de refactorisation...")
 
 elif page == "Silver - Fill Gaps":
-    silver_gaps.render()
+    st.header("🔄 Silver - Fill Gaps")
+    st.info("🚧 Page en cours de refactorisation...")
 
 elif page == "Audit Silver":
-    audit_silver.render()
+    st.header("🔎 Audit Silver")
+    st.info("🚧 Page en cours de refactorisation...")
 
 elif page == "Récup Prix":
-    fetch_prices.render()
+    st.header("🎯 Récupération de prix")
+    st.info("🚧 Page en cours de refactorisation...")
 
 elif page == "Audit Bronze UTC":
-    audit_bronze.render()
+    st.header("🔍 Audit Bronze UTC")
+    st.info("🚧 Page en cours de refactorisation...")
 
 elif page == "Analyses":
     st.header("📈 Analyses")
